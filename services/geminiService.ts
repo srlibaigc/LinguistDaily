@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { Language, WordDefinition, Article } from "../types";
 
@@ -102,18 +103,20 @@ export const preloadLanguageContent = async (language: Language): Promise<Articl
     const articles: Article[] = [];
 
     // 1. Fetch Top News (Search Grounding)
-    // We cannot use responseSchema with googleSearch easily in all contexts, so we parse text.
+    // We ask for articles with audio support if possible
     try {
         const newsPrompt = `
         Act as a language learning content curator.
-        Find the single most significant/viewed news story from today in ${language} from a major official news outlet.
+        Find the single most significant news story today in ${language} from a major official news outlet.
+        Ideally, find a news story that includes an OFFICIAL AUDIO narration or video report (e.g., from a radio station, podcast, or TV news site).
         Summarize this news event into a high-quality B2-level article (approx 150-200 words).
         
         You MUST return a raw JSON string (do not use markdown code blocks) with this exact structure:
         {
             "title": "The headline in ${language}",
             "content": "The article text...",
-            "sourceUrl": "The official URL of the news story found"
+            "sourceUrl": "The official URL of the news story found",
+            "audioUrl": "The DIRECT link to the audio file (.mp3, .m4a) or video file found. If no direct media link is available, leave this empty string."
         }
         `;
 
@@ -132,7 +135,16 @@ export const preloadLanguageContent = async (language: Language): Promise<Articl
         const newsData = JSON.parse(jsonText);
         
         if (newsData.content) {
-             const newsAudio = await generateSpeech(newsData.content, language);
+             let newsAudio = undefined;
+             // Only generate TTS if no official audio URL is provided
+             if (!newsData.audioUrl) {
+                 try {
+                    newsAudio = await generateSpeech(newsData.content, language);
+                 } catch(e) {
+                     console.warn("TTS generation failed", e);
+                 }
+             }
+
              articles.push({
                 id: crypto.randomUUID(),
                 date: new Date().toLocaleDateString(),
@@ -140,6 +152,7 @@ export const preloadLanguageContent = async (language: Language): Promise<Articl
                 content: newsData.content,
                 language: language,
                 audioBase64: newsAudio,
+                audioUrl: newsData.audioUrl,
                 sourceUrl: newsData.sourceUrl
             });
         }

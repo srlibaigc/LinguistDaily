@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Article, Language } from '../types';
 import { decodeAudioData } from '../services/geminiService';
@@ -33,7 +34,7 @@ const getIsoCode = (lang: Language | string): string => {
 };
 
 const formatTime = (seconds: number) => {
-  if (!isFinite(seconds)) return "0:00";
+  if (!isFinite(seconds) || isNaN(seconds)) return "0:00";
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
@@ -43,6 +44,11 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   // Audio State
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  
+  // HTML5 Audio State (for external URLs)
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const [isExternalAudio, setIsExternalAudio] = useState(false);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -50,7 +56,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   const [loopRange, setLoopRange] = useState<{start: number, end: number} | null>(null);
   const [volume, setVolume] = useState(1);
 
-  // Refs for audio control
+  // Refs for Web Audio control
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const startTimeRef = useRef<number>(0); // When playback started (AudioContext time)
@@ -60,53 +66,108 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   // Parsed Data
   const [sentences, setSentences] = useState<SentenceData[]>([]);
 
-  // 1. Initialize Audio Context & Decode
+  // 1. Initialize Audio (Hybrid Engine)
   useEffect(() => {
-    let active = true;
-    const initAudio = async () => {
-      if (!article.audioBase64) return;
-      
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioContextClass({ sampleRate: 24000 });
-      
-      // Create Gain Node for Volume
-      const gainNode = ctx.createGain();
-      gainNode.gain.value = 1; // Initial volume
-      gainNode.connect(ctx.destination);
-      gainNodeRef.current = gainNode;
+    // cleanup previous
+    if (audioContext && audioContext.state !== 'closed') {
+      audioContext.close();
+    }
+    if (audioElRef.current) {
+        audioElRef.current.pause();
+        audioElRef.current = null;
+    }
+    setAudioContext(null);
+    setAudioBuffer(null);
+    setDuration(0);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    pausedAtRef.current = 0;
+    setLoopRange(null);
+    setLoopingSentenceId(null);
 
-      setAudioContext(ctx);
-      
-      try {
-        const buffer = await decodeAudioData(article.audioBase64, ctx);
-        if (active) {
+    const initAudio = async () => {
+      // Case A: External URL (Official Media)
+      if (article.audioUrl) {
+          setIsExternalAudio(true);
+          const audio = new Audio(article.audioUrl);
+          audio.crossOrigin = "anonymous"; // Try to allow CORS if possible
+          audioElRef.current = audio;
+          
+          audio.addEventListener('loadedmetadata', () => {
+              setDuration(audio.duration);
+          });
+          
+          audio.addEventListener('timeupdate', () => {
+             if (!audioElRef.current) return;
+             // Handle Loop Logic for HTML5 Audio manually
+             if (sourceRef.current?.loop) { // Re-using the loop flag concept via state/refs? No, we use loopRange state check
+                 // Inside event listener, state is stale. Access via refs or check in RAF?
+                 // We'll use RAF for precise UI, but timeupdate is good for "logic" checks.
+             }
+             setCurrentTime(audio.currentTime);
+          });
+
+          audio.addEventListener('ended', () => {
+             setIsPlaying(false);
+             setCurrentTime(0);
+          });
+
+          audio.addEventListener('error', (e) => {
+              console.warn("Error playing external audio", e);
+              // Fallback to TTS if possible? Complex to swap live. 
+              // Just letting it fail gracefully for now.
+          });
+
+          return;
+      }
+
+      // Case B: Generated TTS (Base64)
+      if (article.audioBase64) {
+          setIsExternalAudio(false);
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          const ctx = new AudioContextClass({ sampleRate: 24000 });
+          
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = volume; 
+          gainNode.connect(ctx.destination);
+          gainNodeRef.current = gainNode;
+
+          setAudioContext(ctx);
+          
+          try {
+            const buffer = await decodeAudioData(article.audioBase64, ctx);
             setAudioBuffer(buffer);
             setDuration(buffer.duration);
-        }
-      } catch (e) {
-        console.error("Error decoding audio", e);
+          } catch (e) {
+            console.error("Error decoding audio", e);
+          }
       }
     };
+
     initAudio();
     
     return () => {
-      active = false;
-      if (audioContext && audioContext.state !== 'closed') {
-        audioContext.close();
+      if (audioContext && audioContext.state !== 'closed') audioContext.close();
+      if (audioElRef.current) {
+          audioElRef.current.pause();
+          audioElRef.current = null;
       }
     };
-  }, [article.audioBase64]);
+  }, [article.id, article.audioUrl, article.audioBase64]);
 
   // Volume update effect
   useEffect(() => {
-    if (gainNodeRef.current) {
+    if (isExternalAudio && audioElRef.current) {
+        audioElRef.current.volume = volume;
+    } else if (gainNodeRef.current) {
         gainNodeRef.current.gain.value = volume;
     }
-  }, [volume]);
+  }, [volume, isExternalAudio]);
 
-  // 2. Segmentation & Time Mapping Logic
+  // 2. Segmentation & Time Mapping Logic (Depends on DURATION)
   useEffect(() => {
-    if (!audioBuffer || !article.content) return;
+    // Wait for duration to be known (parsed from buffer or loaded from metadata)
+    if (!duration || !article.content) return;
 
     const isoCode = getIsoCode(article.language);
     let rawSegments: { segment: string, index: number }[] = [];
@@ -125,24 +186,22 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
         });
     }
 
-    // Heuristic Weighting for better time distribution
-    // TTS pauses at punctuation, so we add "weight" (virtual characters) to segments with punctuation.
+    // Heuristic Weighting
     const getWeight = (text: string) => {
        let w = text.length; 
-       // Count punctuation
        const periods = (text.match(/[.!?]/g) || []).length;
        const commas = (text.match(/[,;]/g) || []).length;
        const newlines = (text.match(/\n/g) || []).length;
        
-       // Add virtual length for pauses
-       w += periods * 12; // Strong pause
-       w += commas * 4;   // Weak pause
-       w += newlines * 15; // Paragraph pause
+       w += periods * 12; 
+       w += commas * 4;   
+       w += newlines * 15; 
        return w;
     };
 
     const totalWeight = rawSegments.reduce((acc, s) => acc + getWeight(s.segment), 0);
-    const totalDuration = audioBuffer.duration;
+    // Map text to audio duration
+    const totalDuration = duration;
 
     let currentWeight = 0;
     const allMapped = rawSegments.map((s, i) => {
@@ -163,60 +222,83 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
        };
     });
 
-    // Filter out whitespace-only segments for the UI, but they were included in time calc
     setSentences(allMapped.filter(s => !s.isWhitespace));
 
-  }, [audioBuffer, article.content, article.language]);
+  }, [duration, article.content, article.language]);
 
   // 3. Playback Logic
   const play = useCallback((offset: number, range?: { start: number, end: number }) => {
-      if (!audioContext || !audioBuffer || !gainNodeRef.current) return;
-
-      // Stop existing
-      if (sourceRef.current) {
-          try { sourceRef.current.stop(); } catch(e){}
-          sourceRef.current = null;
-      }
-
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      // Connect to gain node instead of destination directly
-      source.connect(gainNodeRef.current);
-
-      if (range) {
-          source.loop = true;
-          source.loopStart = range.start;
-          source.loopEnd = range.end;
+      // HTML5 Audio Engine
+      if (isExternalAudio && audioElRef.current) {
+          const audio = audioElRef.current;
           
-          // Ensure offset is within bounds
-          if (offset < range.start || offset > range.end) {
+          setLoopRange(range || null);
+          
+          // Handle Offset
+          if (range && (offset < range.start || offset > range.end)) {
               offset = range.start;
           }
-          setLoopRange(range);
-      } else {
-          setLoopRange(null);
+          audio.currentTime = offset;
+          
+          // Attempt play
+          audio.play().then(() => {
+              setIsPlaying(true);
+          }).catch(e => console.error("Play failed", e));
+          return;
       }
 
-      source.onended = () => {
-          if (!source.loop) {
-             setIsPlaying(false);
-             // Reset if reached end
-             if (audioContext.currentTime - startTimeRef.current >= audioBuffer.duration - offset - 0.1) {
-                 setCurrentTime(0);
-                 pausedAtRef.current = 0;
-             }
+      // Web Audio Engine
+      if (!isExternalAudio && audioContext && audioBuffer && gainNodeRef.current) {
+          // Stop existing
+          if (sourceRef.current) {
+              try { sourceRef.current.stop(); } catch(e){}
+              sourceRef.current = null;
           }
-      };
 
-      source.start(0, offset);
-      
-      sourceRef.current = source;
-      startTimeRef.current = audioContext.currentTime - offset;
-      pausedAtRef.current = offset;
-      setIsPlaying(true);
-  }, [audioContext, audioBuffer]);
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(gainNodeRef.current);
+
+          if (range) {
+              source.loop = true;
+              source.loopStart = range.start;
+              source.loopEnd = range.end;
+              
+              if (offset < range.start || offset > range.end) {
+                  offset = range.start;
+              }
+              setLoopRange(range);
+          } else {
+              setLoopRange(null);
+          }
+
+          source.onended = () => {
+              if (!source.loop) {
+                 setIsPlaying(false);
+                 if (audioContext.currentTime - startTimeRef.current >= audioBuffer.duration - offset - 0.1) {
+                     setCurrentTime(0);
+                     pausedAtRef.current = 0;
+                 }
+              }
+          };
+
+          source.start(0, offset);
+          sourceRef.current = source;
+          startTimeRef.current = audioContext.currentTime - offset;
+          pausedAtRef.current = offset;
+          setIsPlaying(true);
+      }
+  }, [audioContext, audioBuffer, isExternalAudio]);
 
   const stop = useCallback(() => {
+      if (isExternalAudio && audioElRef.current) {
+          audioElRef.current.pause();
+          setIsPlaying(false);
+          setLoopingSentenceId(null);
+          setLoopRange(null);
+          return;
+      }
+
       if (sourceRef.current) {
           try { sourceRef.current.stop(); } catch(e){}
           sourceRef.current = null;
@@ -224,18 +306,18 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       setIsPlaying(false);
       setLoopingSentenceId(null);
       setLoopRange(null);
-  }, []);
+  }, [isExternalAudio]);
 
   const togglePlay = () => {
       if (isPlaying) {
-          // Pause
           stop();
-          if (audioContext) {
-              pausedAtRef.current = audioContext.currentTime - startTimeRef.current;
-              setLoopingSentenceId(null);
+          // Store pause position logic varies by engine
+          if (!isExternalAudio && audioContext) {
+               pausedAtRef.current = audioContext.currentTime - startTimeRef.current;
+          } else if (isExternalAudio && audioElRef.current) {
+               pausedAtRef.current = audioElRef.current.currentTime;
           }
       } else {
-          // Play
           let startPos = pausedAtRef.current;
           if (startPos >= duration) startPos = 0;
           play(startPos);
@@ -246,7 +328,12 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       const time = parseFloat(e.target.value);
       setCurrentTime(time);
       pausedAtRef.current = time;
-      setLoopingSentenceId(null); // Seek breaks loop
+      setLoopingSentenceId(null);
+      
+      // For HTML5 audio, we must update currentTime immediately even if paused
+      if (isExternalAudio && audioElRef.current) {
+          audioElRef.current.currentTime = time;
+      }
 
       if (isPlaying) {
           play(time);
@@ -259,10 +346,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
 
       setLoopingSentenceId(sentence.id);
       
-      // Add padding to ensure the sentence isn't cut off
       const PADDING_START = 0.2; 
       const PADDING_END = 0.25;
-
       const safeStart = Math.max(0, sentence.startTime - PADDING_START);
       const safeEnd = Math.min(duration, sentence.endTime + PADDING_END);
 
@@ -270,27 +355,37 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       play(safeStart, { start: safeStart, end: safeEnd });
   };
 
-  // 4. Animation Loop for UI Update
+  // 4. Animation Loop (Unified)
   useEffect(() => {
       const loop = () => {
-          if (isPlaying && audioContext) {
-              if (loopRange && sourceRef.current?.loop) {
-                  // In loop mode, approximate visual progress
-                  const loopDuration = loopRange.end - loopRange.start;
-                  const rawElapsed = audioContext.currentTime - startTimeRef.current; 
-                  let linearPos = rawElapsed;
-                  
-                  if (loopDuration > 0) {
-                      const relativePos = (linearPos - loopRange.start) % loopDuration;
-                      linearPos = loopRange.start + relativePos;
-                      if (linearPos < loopRange.start) linearPos = loopRange.start;
-                  }
-                  
-                  setCurrentTime(linearPos);
+          // A-B Loop Check for HTML5 Audio
+          if (isExternalAudio && isPlaying && loopRange && audioElRef.current) {
+              if (audioElRef.current.currentTime >= loopRange.end) {
+                  audioElRef.current.currentTime = loopRange.start;
+              }
+          }
 
-              } else {
-                  const rawTime = audioContext.currentTime - startTimeRef.current;
-                  setCurrentTime(Math.min(rawTime, duration));
+          if (isPlaying) {
+              // For Web Audio, calculate manually
+              if (!isExternalAudio && audioContext) {
+                  if (loopRange && sourceRef.current?.loop) {
+                      const loopDuration = loopRange.end - loopRange.start;
+                      const rawElapsed = audioContext.currentTime - startTimeRef.current; 
+                      let linearPos = rawElapsed;
+                      if (loopDuration > 0) {
+                          const relativePos = (linearPos - loopRange.start) % loopDuration;
+                          linearPos = loopRange.start + relativePos;
+                          if (linearPos < loopRange.start) linearPos = loopRange.start;
+                      }
+                      setCurrentTime(linearPos);
+                  } else {
+                      const rawTime = audioContext.currentTime - startTimeRef.current;
+                      setCurrentTime(Math.min(rawTime, duration));
+                  }
+              }
+              // For HTML5 Audio, we rely on timeupdate/RAF for smoother UI
+              else if (isExternalAudio && audioElRef.current) {
+                  setCurrentTime(audioElRef.current.currentTime);
               }
           }
           rafRef.current = requestAnimationFrame(loop);
@@ -300,10 +395,10 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       return () => {
           if (rafRef.current) cancelAnimationFrame(rafRef.current);
       };
-  }, [isPlaying, audioContext, duration, loopRange]);
+  }, [isPlaying, audioContext, duration, loopRange, isExternalAudio]);
 
 
-  // 5. Text Selection Logic - Double Click
+  // 5. Text Selection
   const handleDoubleClick = () => {
     const selection = window.getSelection();
     if (selection && selection.toString().trim().length > 0) {
@@ -328,17 +423,24 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
          <div className="max-w-3xl mx-auto flex flex-col gap-2">
              <div className="flex items-center justify-between mb-1">
                  <h1 className="text-lg font-bold text-slate-800 truncate pr-4">{article.title}</h1>
-                 <span className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded hidden sm:inline-block">
-                     {loopingSentenceId ? 'Looping Segment' : 'Standard Playback'}
-                 </span>
+                 <div className="flex items-center gap-2">
+                    {isExternalAudio && (
+                        <span className="text-xs font-mono text-orange-600 bg-orange-50 px-2 py-1 rounded hidden sm:inline-block border border-orange-100">
+                            Official Audio
+                        </span>
+                    )}
+                    <span className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded hidden sm:inline-block">
+                        {loopingSentenceId ? 'Looping Segment' : 'Standard Playback'}
+                    </span>
+                 </div>
              </div>
              
              <div className="flex items-center gap-4">
                  <button 
                     onClick={togglePlay}
-                    disabled={!audioBuffer}
+                    disabled={!audioBuffer && !isExternalAudio}
                     className={`w-10 h-10 flex-shrink-0 flex items-center justify-center rounded-full transition-all shadow-sm ${
-                      !audioBuffer ? 'bg-slate-200 text-slate-400 cursor-not-allowed' :
+                      (!audioBuffer && !isExternalAudio) ? 'bg-slate-200 text-slate-400 cursor-not-allowed' :
                       isPlaying ? 'bg-indigo-600 text-white hover:scale-105 active:scale-95' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50 hover:border-indigo-300'
                     }`}
                  >
@@ -457,6 +559,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                                 setCurrentTime(newTime);
                                 if(isPlaying) play(newTime);
                                 else pausedAtRef.current = newTime;
+                                if(isExternalAudio && audioElRef.current) audioElRef.current.currentTime = newTime;
                             }}
                             className="text-slate-400 hover:text-indigo-600 transition-colors flex flex-col items-center gap-1 group"
                             title="Rewind 10s"
@@ -482,6 +585,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                                 setCurrentTime(newTime);
                                 if(isPlaying) play(newTime);
                                 else pausedAtRef.current = newTime;
+                                if(isExternalAudio && audioElRef.current) audioElRef.current.currentTime = newTime;
                             }}
                              className="text-slate-400 hover:text-indigo-600 transition-colors flex flex-col items-center gap-1 group"
                              title="Forward 10s"

@@ -1,3 +1,4 @@
+
 export enum Language {
   JAPANESE = 'Japanese',
   KOREAN = 'Korean',
@@ -37,6 +38,7 @@ export interface Article {
   content: string; // Markdown or HTML
   language: Language;
   audioBase64?: string; // Base64 PCM data
+  audioUrl?: string; // Link to official source audio/video
   sourceUrl?: string; // Link to official source for news
 }
 
