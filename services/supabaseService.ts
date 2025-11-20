@@ -4,10 +4,9 @@ import { ApiSettings } from '../types';
 
 // Use environment variables for connection
 // These should be configured in your deployment environment
-// const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseUrl = 'https://jaekeodpvjayfaofabgu.supabase.co';
-// const supabaseKey = process.env.SUPABASE_ANON_KEY;
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImphZWtlb2RwdmpheWZhb2ZhYmd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM1ODk5MTIsImV4cCI6MjA3OTE2NTkxMn0.MKCRcETARcB70cVyebZYqVCNYBDXdgtHlnYwOgkyfJs';
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
 
 // Initialize client if credentials exist
 const supabase = (supabaseUrl && supabaseKey) 
