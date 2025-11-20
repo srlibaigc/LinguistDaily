@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { Language, WordDefinition } from "../types";
+import { Language, WordDefinition, Article } from "../types";
 
 // Helper to decode base64 to AudioBuffer (for the frontend to play)
 export const decodeAudioData = async (
@@ -14,11 +14,6 @@ export const decodeAudioData = async (
   }
   
   // Raw PCM to AudioBuffer (assuming 24kHz 1 channel from Gemini TTS)
-  // Note: Gemini TTS usually returns raw PCM. We need to wrap it manually if it's raw,
-  // but the guidelines imply raw PCM handling. 
-  // However, standard decoding usually requires a WAV header or raw data ingestion.
-  // The guide example manually converts Int16 PCM to Float32 for buffer.
-  
   const dataInt16 = new Int16Array(bytes.buffer);
   const sampleRate = 24000; 
   const numChannels = 1;
@@ -41,60 +36,8 @@ const getClient = () => {
     return new GoogleGenAI({ apiKey });
 };
 
-export const generateTopics = async (language: Language): Promise<string[]> => {
-    const ai = getClient();
-    const prompt = `Generate 3 distinct, engaging, and educational news topics or article themes suitable for a language learner studying ${language}. 
-    The topics should be culturally relevant to the language. 
-    Return strictly a JSON array of strings.`;
-
-    const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING }
-            }
-        }
-    });
-
-    if (!response.text) return ["Culture and Traditions", "Modern Technology", "Travel Guide"];
-    return JSON.parse(response.text);
-};
-
-export const generateArticle = async (topic: string, language: Language): Promise<{ title: string; content: string }> => {
-    const ai = getClient();
-    const prompt = `Write a high-quality, B2/C1 level news article or report about "${topic}" in ${language}. 
-    The content should be educational, approximately 300 words.
-    Return a JSON object with "title" and "content". The content should be plain text with paragraphs.`;
-
-    const response = await ai.models.generateContent({
-        model: "gemini-3-pro-preview", // Using a smarter model for better writing
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                    title: { type: Type.STRING },
-                    content: { type: Type.STRING }
-                },
-                required: ["title", "content"]
-            }
-        }
-    });
-
-    if (!response.text) throw new Error("Failed to generate article");
-    return JSON.parse(response.text);
-};
-
 export const generateSpeech = async (text: string, language: Language): Promise<string> => {
     const ai = getClient();
-    // Map languages to suitable voices if possible, otherwise default to standard
-    // Current preview TTS voices: 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
-    // We will use 'Kore' as a standard high-quality voice.
-    
     const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
         contents: [{ parts: [{ text: text }] }],
@@ -152,4 +95,108 @@ export const analyzeWord = async (word: string, language: Language, contextSente
     if (!response.text) throw new Error("Failed to analyze word");
     const data = JSON.parse(response.text);
     return { ...data, word }; // Ensure word is set
+};
+
+export const preloadLanguageContent = async (language: Language): Promise<Article[]> => {
+    const ai = getClient();
+    const articles: Article[] = [];
+
+    // 1. Fetch Top News (Search Grounding)
+    // We cannot use responseSchema with googleSearch easily in all contexts, so we parse text.
+    try {
+        const newsPrompt = `
+        Act as a language learning content curator.
+        Find the single most significant/viewed news story from today in ${language} from a major official news outlet.
+        Summarize this news event into a high-quality B2-level article (approx 150-200 words).
+        
+        You MUST return a raw JSON string (do not use markdown code blocks) with this exact structure:
+        {
+            "title": "The headline in ${language}",
+            "content": "The article text...",
+            "sourceUrl": "The official URL of the news story found"
+        }
+        `;
+
+        const newsResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: newsPrompt,
+            config: {
+                tools: [{ googleSearch: {} }]
+            }
+        });
+
+        let jsonText = newsResponse.text || "{}";
+        // Cleanup potential markdown wrapping
+        jsonText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+        
+        const newsData = JSON.parse(jsonText);
+        
+        if (newsData.content) {
+             const newsAudio = await generateSpeech(newsData.content, language);
+             articles.push({
+                id: crypto.randomUUID(),
+                date: new Date().toLocaleDateString(),
+                title: newsData.title || "Daily News",
+                content: newsData.content,
+                language: language,
+                audioBase64: newsAudio,
+                sourceUrl: newsData.sourceUrl
+            });
+        }
+    } catch (e) {
+        console.warn(`Failed to load news for ${language}`, e);
+    }
+
+    // 2. Generate 2 General Articles
+    try {
+        const generalPrompt = `
+        Write 2 distinct, engaging, and educational articles (approx 150 words each) for a student learning ${language}.
+        Topics:
+        1. A specific cultural tradition or history of a country where ${language} is spoken.
+        2. A modern lifestyle trend or technology topic relevant to ${language} speakers.
+        
+        Return a JSON array of objects with "title" and "content".
+        `;
+
+        const generalResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: generalPrompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            title: { type: Type.STRING },
+                            content: { type: Type.STRING }
+                        },
+                        required: ["title", "content"]
+                    }
+                }
+            }
+        });
+
+        const generalData = JSON.parse(generalResponse.text || "[]");
+        
+        // Generate audio in parallel
+        const audioPromises = generalData.map((a: any) => generateSpeech(a.content, language));
+        const audioResults = await Promise.all(audioPromises);
+
+        generalData.forEach((a: any, index: number) => {
+            articles.push({
+                id: crypto.randomUUID(),
+                date: new Date().toLocaleDateString(),
+                title: a.title,
+                content: a.content,
+                language: language,
+                audioBase64: audioResults[index]
+            });
+        });
+
+    } catch (e) {
+         console.warn(`Failed to load general articles for ${language}`, e);
+    }
+
+    return articles;
 };

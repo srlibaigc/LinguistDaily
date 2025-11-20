@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Language, Article, VocabularyItem, AppState } from './types';
-import { generateTopics, generateArticle, generateSpeech, analyzeWord } from './services/geminiService';
+import { generateSpeech, analyzeWord, preloadLanguageContent } from './services/geminiService';
 import { LanguageSelector } from './components/LanguageSelector';
-import { TopicSelector } from './components/TopicSelector';
+import { DailySelection } from './components/DailySelection';
 import { ArticleView } from './components/ArticleView';
 import { SidebarLeft } from './components/SidebarLeft';
 import { SidebarRight } from './components/SidebarRight';
@@ -27,8 +27,12 @@ const App: React.FC = () => {
     loadingMessage: ''
   });
 
-  const [topics, setTopics] = useState<string[]>([]);
-  const [stage, setStage] = useState<'LANG' | 'TOPIC' | 'READ'>('LANG');
+  // Track loading state for each language
+  const [langLoadState, setLangLoadState] = useState<Record<Language, { loading: boolean, ready: boolean }>>({} as any);
+  // Store preloaded articles per language
+  const [preloadedContent, setPreloadedContent] = useState<Record<Language, Article[]>>({} as any);
+
+  const [stage, setStage] = useState<'LANG' | 'SELECTION' | 'READ'>('LANG');
   const [selectedWord, setSelectedWord] = useState<VocabularyItem | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true); // Mobile toggle
 
@@ -47,72 +51,62 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleLanguageSelect = async (lang: Language) => {
-    setState(prev => ({ ...prev, selectedLanguage: lang, isLoading: true, loadingMessage: `Curating topics for ${lang}...` }));
-    try {
-        const generatedTopics = await generateTopics(lang);
-        setTopics(generatedTopics);
-        setStage('TOPIC');
-    } catch (error) {
-        console.error(error);
-        alert("Failed to generate topics. Please check your API key.");
-    } finally {
-        setState(prev => ({ ...prev, isLoading: false }));
-    }
+  // INITIALIZATION: Preload content for all languages
+  useEffect(() => {
+    const languages = Object.values(Language);
+    
+    // Initialize states
+    const initialStates: any = {};
+    languages.forEach(l => {
+        initialStates[l] = { loading: true, ready: false };
+    });
+    setLangLoadState(initialStates);
+
+    // Trigger preloads
+    languages.forEach(lang => {
+        preloadLanguageContent(lang).then(articles => {
+            setPreloadedContent(prev => ({ ...prev, [lang]: articles }));
+            setLangLoadState(prev => ({
+                ...prev,
+                [lang]: { loading: false, ready: articles.length > 0 }
+            }));
+        }).catch(err => {
+            console.error(`Failed to preload ${lang}`, err);
+            setLangLoadState(prev => ({
+                ...prev,
+                [lang]: { loading: false, ready: false } // Failed
+            }));
+        });
+    });
+  }, []);
+
+  const handleLanguageSelect = (lang: Language) => {
+    setState(prev => ({ ...prev, selectedLanguage: lang }));
+    setStage('SELECTION');
   };
 
-  const handleTopicSelect = async (topic: string) => {
-    if (!state.selectedLanguage) return;
-    
-    setState(prev => ({ ...prev, isLoading: true, loadingMessage: `Writing article about ${topic} and generating high-quality narration...` }));
-    
-    try {
-        // Parallel generation for speed, though text is needed for audio technically. 
-        // In a real app, we generate text first, then audio.
-        const articleData = await generateArticle(topic, state.selectedLanguage);
-        
-        // Generate Audio
-        setState(prev => ({ ...prev, loadingMessage: 'Synthesizing audio...' }));
-        const audioData = await generateSpeech(articleData.content, state.selectedLanguage);
-        
-        const newArticle: Article = {
-            id: crypto.randomUUID(),
-            date: new Date().toLocaleDateString(),
-            title: articleData.title,
-            content: articleData.content,
-            language: state.selectedLanguage,
-            audioBase64: audioData
-        };
+  const handleArticleSelect = async (article: Article) => {
+      const updatedHistory = [article, ...state.history];
+      
+      setState(prev => ({
+          ...prev,
+          currentArticle: article,
+          history: updatedHistory
+      }));
 
-        const updatedHistory = [newArticle, ...state.history];
-        
-        // Update State (includes audio)
-        setState(prev => ({
-            ...prev,
-            currentArticle: newArticle,
-            history: updatedHistory
-        }));
+      // Save to LocalStorage (EXCLUDES audio)
+      try {
+        const historyForStorage = updatedHistory.map(a => {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { audioBase64, ...rest } = a;
+          return rest;
+        });
+        localStorage.setItem('linguist_history', JSON.stringify(historyForStorage));
+      } catch (e) {
+        console.warn("Failed to save history", e);
+      }
 
-        // Save to LocalStorage (EXCLUDES audio to prevent QuotaExceededError)
-        try {
-          const historyForStorage = updatedHistory.map(article => {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { audioBase64, ...rest } = article;
-            return rest;
-          });
-          localStorage.setItem('linguist_history', JSON.stringify(historyForStorage));
-        } catch (e) {
-          console.warn("Failed to save history to localStorage (likely quota exceeded)", e);
-        }
-
-        setStage('READ');
-
-    } catch (error) {
-        console.error(error);
-        alert("Failed to create lesson.");
-    } finally {
-        setState(prev => ({ ...prev, isLoading: false }));
-    }
+      setStage('READ');
   };
 
   const handleWordSelect = async (word: string, context: string) => {
@@ -247,8 +241,19 @@ const App: React.FC = () => {
         </div>
 
         <div className="p-6 min-h-full">
-            {stage === 'LANG' && <LanguageSelector onSelect={handleLanguageSelect} />}
-            {stage === 'TOPIC' && <TopicSelector topics={topics} onSelect={handleTopicSelect} language={state.selectedLanguage!} />}
+            {stage === 'LANG' && (
+                <LanguageSelector 
+                    onSelect={handleLanguageSelect} 
+                    loadingStates={langLoadState}
+                />
+            )}
+            {stage === 'SELECTION' && state.selectedLanguage && (
+                <DailySelection 
+                    articles={preloadedContent[state.selectedLanguage] || []}
+                    onSelect={handleArticleSelect}
+                    language={state.selectedLanguage}
+                />
+            )}
             {stage === 'READ' && state.currentArticle && (
                 <ArticleView 
                     article={state.currentArticle} 

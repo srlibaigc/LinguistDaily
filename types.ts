@@ -37,6 +37,7 @@ export interface Article {
   content: string; // Markdown or HTML
   language: Language;
   audioBase64?: string; // Base64 PCM data
+  sourceUrl?: string; // Link to official source for news
 }
 
 export interface AppState {
