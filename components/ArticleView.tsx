@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { Article, Language } from '../types';
-import { decodeAudioData } from '../services/geminiService';
+import { decodeAudioData } from '../services/aiService';
 
 interface Props {
   article: Article;
@@ -99,11 +99,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
           
           audio.addEventListener('timeupdate', () => {
              if (!audioElRef.current) return;
-             // Handle Loop Logic for HTML5 Audio manually
-             if (sourceRef.current?.loop) { // Re-using the loop flag concept via state/refs? No, we use loopRange state check
-                 // Inside event listener, state is stale. Access via refs or check in RAF?
-                 // We'll use RAF for precise UI, but timeupdate is good for "logic" checks.
-             }
+             // Only update if playing or we need sync
              setCurrentTime(audio.currentTime);
           });
 
@@ -114,8 +110,6 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
 
           audio.addEventListener('error', (e) => {
               console.warn("Error playing external audio", e);
-              // Fallback to TTS if possible? Complex to swap live. 
-              // Just letting it fail gracefully for now.
           });
 
           return;
@@ -135,7 +129,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
           setAudioContext(ctx);
           
           try {
-            const buffer = await decodeAudioData(article.audioBase64, ctx);
+            // Pass encoding type to decoder
+            const buffer = await decodeAudioData(article.audioBase64, ctx, article.audioEncoding || 'pcm');
             setAudioBuffer(buffer);
             setDuration(buffer.duration);
           } catch (e) {
@@ -176,8 +171,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
         const segmenter = new (Intl as any).Segmenter(isoCode, { granularity: 'sentence' });
         rawSegments = Array.from(segmenter.segment(article.content));
     } catch (e) {
-        // Fallback regex split
-        const raw = article.content.match(/[^.!?]+[.!?]+["']?|[^.!?]+$/g) || [article.content];
+        // Fallback regex split (Enhanced for CJK)
+        const raw = article.content.match(/[^.!?。！？]+[.!?。！？]+["']?|[^.!?。！？]+$/g) || [article.content];
         let currentIndex = 0;
         rawSegments = raw.map(s => {
             const item = { segment: s, index: currentIndex };
@@ -186,16 +181,20 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
         });
     }
 
-    // Heuristic Weighting
+    // Heuristic Weighting - Refined for Better Timestamp Alignment
     const getWeight = (text: string) => {
        let w = text.length; 
-       const periods = (text.match(/[.!?]/g) || []).length;
-       const commas = (text.match(/[,;]/g) || []).length;
+       
+       // Punctuation marks imply pauses in speech
+       const periods = (text.match(/[.!?。！？]/g) || []).length; // Sentence terminators
+       const commas = (text.match(/[,;：、，；]/g) || []).length; // Mid-sentence pauses
+       const quotes = (text.match(/["'""'']/g) || []).length;
        const newlines = (text.match(/\n/g) || []).length;
        
-       w += periods * 12; 
-       w += commas * 4;   
-       w += newlines * 15; 
+       w += periods * 20;  // Approx 1.2s equivalent chars pause
+       w += commas * 8;    // Approx 0.5s equivalent chars pause
+       w += quotes * 2;
+       w += newlines * 25; // Paragraph breaks are long
        return w;
     };
 
@@ -235,9 +234,12 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
           setLoopRange(range || null);
           
           // Handle Offset
-          if (range && (offset < range.start || offset > range.end)) {
-              offset = range.start;
+          if (range) {
+               if (offset < range.start || offset > range.end) {
+                  offset = range.start;
+               }
           }
+          
           audio.currentTime = offset;
           
           // Attempt play
@@ -262,9 +264,10 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
           if (range) {
               source.loop = true;
               source.loopStart = range.start;
-              source.loopEnd = range.end;
+              // Clamp loopEnd to buffer duration to prevent glitches
+              source.loopEnd = Math.min(audioBuffer.duration, range.end);
               
-              if (offset < range.start || offset > range.end) {
+              if (offset < range.start || offset > source.loopEnd) {
                   offset = range.start;
               }
               setLoopRange(range);
@@ -329,8 +332,9 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       setCurrentTime(time);
       pausedAtRef.current = time;
       setLoopingSentenceId(null);
+      setLoopRange(null);
       
-      // For HTML5 audio, we must update currentTime immediately even if paused
+      // For HTML5 audio, we must update currentTime immediately
       if (isExternalAudio && audioElRef.current) {
           audioElRef.current.currentTime = time;
       }
@@ -341,17 +345,24 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   };
 
   const handleSentenceClick = (sentence: SentenceData) => {
+      // Don't trigger if selecting text
       const selection = window.getSelection();
       if (selection && selection.toString().length > 0) return;
 
       setLoopingSentenceId(sentence.id);
       
-      const PADDING_START = 0.2; 
-      const PADDING_END = 0.25;
+      // Add generous padding to ensure the full sentence and its natural pause are played
+      const PADDING_START = 0.1; 
+      const PADDING_END = 1.0; 
+
       const safeStart = Math.max(0, sentence.startTime - PADDING_START);
       const safeEnd = Math.min(duration, sentence.endTime + PADDING_END);
 
       setCurrentTime(safeStart);
+      if (isExternalAudio && audioElRef.current) {
+          audioElRef.current.currentTime = safeStart;
+      }
+      
       play(safeStart, { start: safeStart, end: safeEnd });
   };
 
@@ -369,13 +380,20 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
               // For Web Audio, calculate manually
               if (!isExternalAudio && audioContext) {
                   if (loopRange && sourceRef.current?.loop) {
-                      const loopDuration = loopRange.end - loopRange.start;
+                      const loopDuration = (sourceRef.current.loopEnd || loopRange.end) - sourceRef.current.loopStart;
                       const rawElapsed = audioContext.currentTime - startTimeRef.current; 
+                      
+                      // Calculate position within the loop
                       let linearPos = rawElapsed;
                       if (loopDuration > 0) {
-                          const relativePos = (linearPos - loopRange.start) % loopDuration;
-                          linearPos = loopRange.start + relativePos;
+                          // Position relative to start of loop
+                          const offsetInLoop = (rawElapsed - loopRange.start) % loopDuration;
+                          linearPos = loopRange.start + offsetInLoop;
+                          
+                          // Correction for modulo of negative numbers if start time calc is off
                           if (linearPos < loopRange.start) linearPos = loopRange.start;
+                      } else {
+                          linearPos = loopRange.start;
                       }
                       setCurrentTime(linearPos);
                   } else {
@@ -418,82 +436,19 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
 
   return (
     <div className="max-w-3xl mx-auto animate-fade-in pb-32 px-2 md:px-0">
-      {/* Sticky Audio Player */}
-      <div className="sticky top-0 z-40 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/60 border-b border-indigo-100 shadow-sm -mx-6 px-6 py-4 mb-8 transition-all rounded-b-xl">
-         <div className="max-w-3xl mx-auto flex flex-col gap-2">
-             <div className="flex items-center justify-between mb-1">
-                 <h1 className="text-lg font-bold text-slate-800 truncate pr-4">{article.title}</h1>
-                 <div className="flex items-center gap-2">
-                    {isExternalAudio && (
-                        <span className="text-xs font-mono text-orange-600 bg-orange-50 px-2 py-1 rounded hidden sm:inline-block border border-orange-100">
-                            Official Audio
-                        </span>
-                    )}
-                    <span className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded hidden sm:inline-block">
-                        {loopingSentenceId ? 'Looping Segment' : 'Standard Playback'}
-                    </span>
-                 </div>
-             </div>
-             
-             <div className="flex items-center gap-4">
-                 <button 
-                    onClick={togglePlay}
-                    disabled={!audioBuffer && !isExternalAudio}
-                    className={`w-10 h-10 flex-shrink-0 flex items-center justify-center rounded-full transition-all shadow-sm ${
-                      (!audioBuffer && !isExternalAudio) ? 'bg-slate-200 text-slate-400 cursor-not-allowed' :
-                      isPlaying ? 'bg-indigo-600 text-white hover:scale-105 active:scale-95' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50 hover:border-indigo-300'
-                    }`}
-                 >
-                   {isPlaying ? (
-                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>
-                   ) : (
-                      <svg className="w-4 h-4 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                   )}
-                 </button>
-                 
-                 <div className="flex-1 flex items-center gap-3">
-                     <span className="text-xs text-slate-500 font-mono w-8 text-right hidden sm:inline-block">{formatTime(currentTime)}</span>
-                     <div className="relative flex-1 h-8 flex items-center group">
-                        {/* Progress Track Background */}
-                        <div className="absolute w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                            <div 
-                                className="h-full bg-indigo-200 transition-all duration-100" 
-                                style={{ width: `${(currentTime / (duration || 1)) * 100}%` }} 
-                            />
-                        </div>
-                        
-                        {/* Loop Markers */}
-                        {loopRange && (
-                            <div 
-                                className="absolute h-1.5 bg-indigo-500/30 pointer-events-none z-10 rounded-sm"
-                                style={{ 
-                                    left: `${(loopRange.start / (duration || 1)) * 100}%`, 
-                                    width: `${((loopRange.end - loopRange.start) / (duration || 1)) * 100}%` 
-                                }}
-                            />
-                        )}
-
-                        {/* Input Range */}
-                        <input 
-                            type="range" 
-                            min="0" 
-                            max={duration || 100} 
-                            step="0.05"
-                            value={currentTime}
-                            onChange={handleSeek}
-                            className="absolute inset-0 w-full opacity-0 cursor-pointer z-20"
-                        />
-                        
-                        {/* Thumb Visual */}
-                        <div 
-                            className="absolute w-3 h-3 bg-indigo-600 rounded-full shadow pointer-events-none transition-all duration-75 group-hover:scale-125 z-10"
-                            style={{ left: `${(currentTime / (duration || 1)) * 100}%`, transform: 'translateX(-50%)' }}
-                        />
-                     </div>
-                     <span className="text-xs text-slate-400 font-mono w-8 hidden sm:inline-block">{formatTime(duration)}</span>
-                 </div>
-             </div>
-         </div>
+      {/* Article Header Information */}
+      <div className="mb-8 mt-4 border-b border-slate-100 pb-6">
+          <h1 className="text-3xl font-bold text-slate-800 leading-tight mb-4">{article.title}</h1>
+          <div className="flex items-center gap-2">
+             {isExternalAudio && (
+                 <span className="text-xs font-mono text-orange-600 bg-orange-50 px-2 py-1 rounded inline-block border border-orange-100">
+                     Official Audio
+                 </span>
+             )}
+             <span className={`text-xs font-mono px-2 py-1 rounded inline-block transition-colors ${loopingSentenceId ? 'text-indigo-600 bg-indigo-50' : 'text-slate-400 bg-slate-50'}`}>
+                 {loopingSentenceId ? 'Looping Segment' : 'Standard Playback'}
+             </span>
+          </div>
       </div>
 
       {/* Content */}
@@ -620,9 +575,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                 </div>
             </div>
         </div>
-      </div>
 
-      <div className="mt-8 p-4 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800 flex items-start gap-3">
+        <div className="mt-8 p-4 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800 flex items-start gap-3">
         <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
@@ -638,3 +592,4 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
     </div>
   );
 };
+    

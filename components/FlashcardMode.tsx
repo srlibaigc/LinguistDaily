@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { VocabularyItem } from '../types';
 
@@ -5,7 +6,7 @@ interface Props {
   items: VocabularyItem[];
   onClose: () => void;
   onResult: (id: string, success: boolean) => void;
-  onPlayAudio: (base64: string) => void;
+  onPlayAudio: (base64: string, encoding?: 'pcm' | 'mp3') => void;
 }
 
 export const FlashcardMode: React.FC<Props> = ({ items, onClose, onResult, onPlayAudio }) => {
@@ -82,7 +83,7 @@ export const FlashcardMode: React.FC<Props> = ({ items, onClose, onResult, onPla
                         
                         {currentItem.audioBase64 && (
                             <button 
-                                onClick={(e) => { e.stopPropagation(); onPlayAudio(currentItem.audioBase64!); }}
+                                onClick={(e) => { e.stopPropagation(); onPlayAudio(currentItem.audioBase64!, currentItem.audioEncoding); }}
                                 className="p-5 bg-indigo-50 text-indigo-600 rounded-full hover:bg-indigo-600 hover:text-white hover:scale-110 transition-all shadow-sm ring-1 ring-indigo-100"
                                 title="Play Pronunciation"
                             >

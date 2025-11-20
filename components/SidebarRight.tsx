@@ -1,6 +1,7 @@
+
 import React from 'react';
 import { VocabularyItem } from '../types';
-import { decodeAudioData } from '../services/geminiService';
+import { decodeAudioData } from '../services/aiService';
 
 interface Props {
   vocabulary: VocabularyItem[];
@@ -21,14 +22,14 @@ const getReviewStatus = (nextReview: number) => {
 
 export const SidebarRight: React.FC<Props> = ({ vocabulary, onUploadDictionary, onViewWord, onStartReview }) => {
 
-  const playAudio = async (e: React.MouseEvent, base64?: string) => {
+  const playAudio = async (e: React.MouseEvent, base64?: string, encoding?: 'pcm' | 'mp3') => {
     e.stopPropagation();
     if (!base64) return;
     
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContextClass({ sampleRate: 24000 });
-      const buffer = await decodeAudioData(base64, ctx);
+      const buffer = await decodeAudioData(base64, ctx, encoding || 'pcm');
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(ctx.destination);
@@ -98,7 +99,7 @@ export const SidebarRight: React.FC<Props> = ({ vocabulary, onUploadDictionary, 
                                 <span className="font-bold text-slate-800 group-hover:text-indigo-600">{item.word}</span>
                                 {item.audioBase64 && (
                                     <button 
-                                        onClick={(e) => playAudio(e, item.audioBase64)}
+                                        onClick={(e) => playAudio(e, item.audioBase64, item.audioEncoding)}
                                         className="text-slate-400 hover:text-indigo-600 transition-colors p-1 rounded-full hover:bg-indigo-50"
                                         title="Play pronunciation"
                                     >

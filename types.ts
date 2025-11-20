@@ -10,6 +10,18 @@ export enum Language {
   SPANISH = 'Spanish'
 }
 
+export type ApiProvider = 'gemini' | 'openai' | 'deepseek';
+
+export interface ApiSettings {
+  primary: ApiProvider; // Always 'gemini' in this specific requirement, but flexible for future
+  backup: ApiProvider;
+  keys: {
+    gemini?: string;
+    openai?: string;
+    deepseek?: string;
+  };
+}
+
 export interface WordDefinition {
   word: string;
   phonetic: string;
@@ -29,6 +41,7 @@ export interface VocabularyItem extends WordDefinition {
   contextSentence?: string;
   lastReviewedAt?: number; // Timestamp of last manual review
   audioBase64?: string; // Pronunciation audio
+  audioEncoding?: 'pcm' | 'mp3'; // Gemini uses PCM, others usually MP3
 }
 
 export interface Article {
@@ -37,7 +50,8 @@ export interface Article {
   title: string;
   content: string; // Markdown or HTML
   language: Language;
-  audioBase64?: string; // Base64 PCM data
+  audioBase64?: string; // Base64 data
+  audioEncoding?: 'pcm' | 'mp3'; 
   audioUrl?: string; // Link to official source audio/video
   sourceUrl?: string; // Link to official source for news
 }
@@ -49,4 +63,5 @@ export interface AppState {
   vocabulary: VocabularyItem[];
   isLoading: boolean;
   loadingMessage: string;
+  apiSettings: ApiSettings;
 }
