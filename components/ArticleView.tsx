@@ -261,33 +261,12 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
               if (loopRange && sourceRef.current?.loop) {
                   // In loop mode, approximate visual progress
                   const loopDuration = loopRange.end - loopRange.start;
-                  // Calculate time since play started relative to the loop
-                  // Note: AudioContext time keeps increasing.
                   const rawElapsed = audioContext.currentTime - startTimeRef.current; 
-                  // We need to be careful: play(offset) sets startTimeRef = now - offset.
-                  // If offset was inside loop, rawElapsed approximates linear time.
-                  // But physically it loops.
-                  // A simpler visual trick:
-                  // (elapsed % loopDuration) + loopStart
-                  // But we need to account for the initial offset within the loop.
-                  
-                  // Let's use a simpler approach for UI: clamp to range
-                  // Or just use the raw time and modulo logic if we assume perfect loop.
-                  // Given the complexity, let's just try to clamp local timer.
-                  
-                  // Actually, tracking 'audioContext.currentTime' against 'startTimeRef' is linear.
-                  // We need to simulate the loop for the progress bar.
-                  // Current linear time:
                   let linearPos = rawElapsed;
                   
-                  // If we are looping, the position wraps around
                   if (loopDuration > 0) {
-                      // Adjust linearPos to be relative to start of loop
                       const relativePos = (linearPos - loopRange.start) % loopDuration;
-                      // Handle negative modulo if seeking backwards? (Unlikely here)
                       linearPos = loopRange.start + relativePos;
-                      
-                      // Correction for negative results if rawElapsed < loopRange.start (shouldn't happen with logic)
                       if (linearPos < loopRange.start) linearPos = loopRange.start;
                   }
                   
@@ -308,8 +287,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   }, [isPlaying, audioContext, duration, loopRange]);
 
 
-  // 5. Text Selection Logic
-  const handleTextSelection = () => {
+  // 5. Text Selection Logic - Double Click
+  const handleDoubleClick = () => {
     const selection = window.getSelection();
     if (selection && selection.toString().trim().length > 0) {
       const word = selection.toString().trim();
@@ -327,13 +306,13 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   }, [currentTime, sentences]);
 
   return (
-    <div className="max-w-3xl mx-auto animate-fade-in pb-32">
+    <div className="max-w-3xl mx-auto animate-fade-in pb-32 px-2 md:px-0">
       {/* Sticky Audio Player */}
-      <div className="sticky top-0 z-40 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/60 border-b border-indigo-100 shadow-sm -mx-6 px-6 py-4 mb-8 transition-all">
+      <div className="sticky top-0 z-40 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/60 border-b border-indigo-100 shadow-sm -mx-6 px-6 py-4 mb-8 transition-all rounded-b-xl">
          <div className="max-w-3xl mx-auto flex flex-col gap-2">
              <div className="flex items-center justify-between mb-1">
                  <h1 className="text-lg font-bold text-slate-800 truncate pr-4">{article.title}</h1>
-                 <span className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                 <span className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded hidden sm:inline-block">
                      {loopingSentenceId ? 'Looping Segment' : 'Standard Playback'}
                  </span>
              </div>
@@ -355,7 +334,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                  </button>
                  
                  <div className="flex-1 flex items-center gap-3">
-                     <span className="text-xs text-slate-500 font-mono w-10 text-right">{formatTime(currentTime)}</span>
+                     <span className="text-xs text-slate-500 font-mono w-8 text-right hidden sm:inline-block">{formatTime(currentTime)}</span>
                      <div className="relative flex-1 h-8 flex items-center group">
                         {/* Progress Track Background */}
                         <div className="absolute w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
@@ -393,7 +372,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                             style={{ left: `${(currentTime / (duration || 1)) * 100}%`, transform: 'translateX(-50%)' }}
                         />
                      </div>
-                     <span className="text-xs text-slate-400 font-mono w-10">{formatTime(duration)}</span>
+                     <span className="text-xs text-slate-400 font-mono w-8 hidden sm:inline-block">{formatTime(duration)}</span>
                  </div>
              </div>
          </div>
@@ -402,8 +381,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       {/* Content */}
       <article 
         className="article-text text-lg md:text-xl leading-loose text-slate-800 select-text"
-        onMouseUp={handleTextSelection}
-        onTouchEnd={handleTextSelection}
+        onDoubleClick={handleDoubleClick}
       >
         {sentences.length === 0 ? (
             article.content.split('\n').map((para, i) => <p key={i} className="mb-6">{para}</p>)
@@ -423,7 +401,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                                 ${isActive ? 'bg-yellow-100 text-slate-900' : 'hover:bg-indigo-50'}
                                 ${isLooping ? 'ring-2 ring-indigo-400 bg-indigo-50' : ''}
                             `}
-                            title="Click to play and loop this sentence"
+                            title="Click to play sentence. Double click word to add to vocabulary."
                          >
                             {s.text}{' '}
                          </span>
@@ -441,8 +419,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
         <div>
             <p className="font-semibold mb-1">Interactive Learning Tips:</p>
             <ul className="list-disc list-inside space-y-1 opacity-90">
-                <li>Click any sentence to listen to it on loop. Great for shadowing practice!</li>
-                <li>Select any word (highlight it) to see definitions and add it to your review list.</li>
+                <li>Click any sentence to listen to it on loop.</li>
+                <li><strong>Double-click</strong> any word to see definitions and add it to your vocabulary list.</li>
                 <li>Use the slider to jump to any part of the report.</li>
             </ul>
         </div>

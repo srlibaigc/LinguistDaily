@@ -6,6 +6,7 @@ interface Props {
   vocabulary: VocabularyItem[];
   onUploadDictionary: () => void;
   onViewWord: (word: VocabularyItem) => void;
+  onStartReview: () => void;
 }
 
 // Helper to calculate urgency based on Ebbinghaus
@@ -18,7 +19,7 @@ const getReviewStatus = (nextReview: number) => {
     return { color: 'bg-green-400', text: 'On Track' };
 };
 
-export const SidebarRight: React.FC<Props> = ({ vocabulary, onUploadDictionary, onViewWord }) => {
+export const SidebarRight: React.FC<Props> = ({ vocabulary, onUploadDictionary, onViewWord, onStartReview }) => {
 
   const playAudio = async (e: React.MouseEvent, base64?: string) => {
     e.stopPropagation();
@@ -40,8 +41,10 @@ export const SidebarRight: React.FC<Props> = ({ vocabulary, onUploadDictionary, 
     }
   };
 
+  const dueCount = vocabulary.filter(v => v.nextReviewAt <= Date.now()).length;
+
   return (
-    <div className="h-full bg-slate-50 border-l border-slate-200 p-4 flex flex-col overflow-hidden">
+    <div className="h-full w-full bg-slate-50 border-l border-slate-200 p-4 flex flex-col overflow-hidden pt-14 lg:pt-4">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
           Vocabulary
@@ -54,11 +57,28 @@ export const SidebarRight: React.FC<Props> = ({ vocabulary, onUploadDictionary, 
           Import Dict
         </button>
       </div>
+
+      {/* Review Action Button */}
+      {vocabulary.length > 0 && (
+        <div className="mb-4">
+            <button
+                onClick={onStartReview}
+                className={`w-full py-3 px-4 rounded-xl font-bold shadow-sm transition-all flex items-center justify-center gap-2
+                    ${dueCount > 0 
+                        ? 'bg-indigo-600 text-white hover:bg-indigo-700 animate-pulse-slow' 
+                        : 'bg-white text-slate-600 border border-slate-200 hover:border-indigo-300 hover:text-indigo-600'
+                    }`}
+            >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                {dueCount > 0 ? `Review ${dueCount} Words` : 'Practice Flashcards'}
+            </button>
+        </div>
+      )}
       
       <div className="flex-1 overflow-y-auto pr-2 space-y-2">
          {vocabulary.length === 0 ? (
             <div className="text-slate-400 text-sm italic p-2 text-center mt-10">
-                Select words in the text to add them here.
+                Double-click words in the text to add them here.
             </div>
          ) : (
              vocabulary.map((item) => {
