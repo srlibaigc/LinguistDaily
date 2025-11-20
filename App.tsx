@@ -34,13 +34,17 @@ const App: React.FC = () => {
 
   // Load data from local storage on mount
   useEffect(() => {
-    const savedHistory = localStorage.getItem('linguist_history');
-    const savedVocab = localStorage.getItem('linguist_vocab');
-    setState(prev => ({
-        ...prev,
-        history: savedHistory ? JSON.parse(savedHistory) : [],
-        vocabulary: savedVocab ? JSON.parse(savedVocab) : []
-    }));
+    try {
+      const savedHistory = localStorage.getItem('linguist_history');
+      const savedVocab = localStorage.getItem('linguist_vocab');
+      setState(prev => ({
+          ...prev,
+          history: savedHistory ? JSON.parse(savedHistory) : [],
+          vocabulary: savedVocab ? JSON.parse(savedVocab) : []
+      }));
+    } catch (e) {
+      console.error("Failed to load data from storage", e);
+    }
   }, []);
 
   const handleLanguageSelect = async (lang: Language) => {
@@ -81,13 +85,26 @@ const App: React.FC = () => {
         };
 
         const updatedHistory = [newArticle, ...state.history];
-        localStorage.setItem('linguist_history', JSON.stringify(updatedHistory));
-
+        
+        // Update State (includes audio)
         setState(prev => ({
             ...prev,
             currentArticle: newArticle,
             history: updatedHistory
         }));
+
+        // Save to LocalStorage (EXCLUDES audio to prevent QuotaExceededError)
+        try {
+          const historyForStorage = updatedHistory.map(article => {
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { audioBase64, ...rest } = article;
+            return rest;
+          });
+          localStorage.setItem('linguist_history', JSON.stringify(historyForStorage));
+        } catch (e) {
+          console.warn("Failed to save history to localStorage (likely quota exceeded)", e);
+        }
+
         setStage('READ');
 
     } catch (error) {
@@ -108,18 +125,32 @@ const App: React.FC = () => {
 
     setState(prev => ({ ...prev, isLoading: true, loadingMessage: `Analyzing "${word}"...` }));
     try {
-        const details = await analyzeWord(word, state.selectedLanguage!, context);
+        // Generate analysis and pronunciation audio in parallel
+        const [details, audioBase64] = await Promise.all([
+            analyzeWord(word, state.selectedLanguage!, context),
+            generateSpeech(word, state.selectedLanguage!).catch(e => {
+                console.warn("Failed to generate pronunciation audio", e);
+                return undefined;
+            })
+        ]);
+
         const newItem: VocabularyItem = {
             ...details,
             id: crypto.randomUUID(),
             addedAt: Date.now(),
             nextReviewAt: Date.now() + INTERVALS[0],
             reviewStage: 0,
-            contextSentence: context
+            contextSentence: context,
+            audioBase64: audioBase64
         };
 
         const updatedVocab = [newItem, ...state.vocabulary];
-        localStorage.setItem('linguist_vocab', JSON.stringify(updatedVocab));
+        
+        try {
+          localStorage.setItem('linguist_vocab', JSON.stringify(updatedVocab));
+        } catch (e) {
+          console.error("Failed to save vocabulary", e);
+        }
         
         setState(prev => ({ ...prev, vocabulary: updatedVocab }));
         setSelectedWord(newItem);
@@ -149,7 +180,11 @@ const App: React.FC = () => {
           return item;
       });
 
-      localStorage.setItem('linguist_vocab', JSON.stringify(updatedVocab));
+      try {
+        localStorage.setItem('linguist_vocab', JSON.stringify(updatedVocab));
+      } catch (e) {
+        console.error("Failed to update vocabulary in storage", e);
+      }
       
       // Update state
       setState(prev => ({ ...prev, vocabulary: updatedVocab }));

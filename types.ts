@@ -27,6 +27,7 @@ export interface VocabularyItem extends WordDefinition {
   reviewStage: number; // 0 to 5
   contextSentence?: string;
   lastReviewedAt?: number; // Timestamp of last manual review
+  audioBase64?: string; // Pronunciation audio
 }
 
 export interface Article {
