@@ -47,11 +47,12 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [loopingSentenceId, setLoopingSentenceId] = useState<string | null>(null);
-  // Track the effective loop range for UI visualization
   const [loopRange, setLoopRange] = useState<{start: number, end: number} | null>(null);
+  const [volume, setVolume] = useState(1);
 
   // Refs for audio control
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
   const startTimeRef = useRef<number>(0); // When playback started (AudioContext time)
   const pausedAtRef = useRef<number>(0); // Offset within the file
   const rafRef = useRef<number | null>(null);
@@ -65,7 +66,15 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
     const initAudio = async () => {
       if (!article.audioBase64) return;
       
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContextClass({ sampleRate: 24000 });
+      
+      // Create Gain Node for Volume
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = 1; // Initial volume
+      gainNode.connect(ctx.destination);
+      gainNodeRef.current = gainNode;
+
       setAudioContext(ctx);
       
       try {
@@ -87,6 +96,13 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       }
     };
   }, [article.audioBase64]);
+
+  // Volume update effect
+  useEffect(() => {
+    if (gainNodeRef.current) {
+        gainNodeRef.current.gain.value = volume;
+    }
+  }, [volume]);
 
   // 2. Segmentation & Time Mapping Logic
   useEffect(() => {
@@ -154,7 +170,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
 
   // 3. Playback Logic
   const play = useCallback((offset: number, range?: { start: number, end: number }) => {
-      if (!audioContext || !audioBuffer) return;
+      if (!audioContext || !audioBuffer || !gainNodeRef.current) return;
 
       // Stop existing
       if (sourceRef.current) {
@@ -164,7 +180,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
 
       const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(audioContext.destination);
+      // Connect to gain node instead of destination directly
+      source.connect(gainNodeRef.current);
 
       if (range) {
           source.loop = true;
@@ -243,7 +260,6 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
       setLoopingSentenceId(sentence.id);
       
       // Add padding to ensure the sentence isn't cut off
-      // Start slightly earlier and end slightly later
       const PADDING_START = 0.2; 
       const PADDING_END = 0.25;
 
@@ -340,7 +356,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                         <div className="absolute w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                             <div 
                                 className="h-full bg-indigo-200 transition-all duration-100" 
-                                style={{ width: `${(currentTime / duration) * 100}%` }} 
+                                style={{ width: `${(currentTime / (duration || 1)) * 100}%` }} 
                             />
                         </div>
                         
@@ -349,8 +365,8 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
                             <div 
                                 className="absolute h-1.5 bg-indigo-500/30 pointer-events-none z-10 rounded-sm"
                                 style={{ 
-                                    left: `${(loopRange.start / duration) * 100}%`, 
-                                    width: `${((loopRange.end - loopRange.start) / duration) * 100}%` 
+                                    left: `${(loopRange.start / (duration || 1)) * 100}%`, 
+                                    width: `${((loopRange.end - loopRange.start) / (duration || 1)) * 100}%` 
                                 }}
                             />
                         )}
@@ -412,7 +428,97 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
         )}
       </article>
 
-      <div className="mt-12 p-4 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800 flex items-start gap-3">
+      {/* Dedicated Audio Controls Section */}
+      <div className="mt-12 border-t border-slate-100 pt-8">
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-6 flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+                Audio Controls
+            </h3>
+            
+            <div className="flex flex-col gap-6">
+                {/* Time Scrubber */}
+                <div className="flex items-center gap-3 text-xs font-mono font-medium text-slate-500">
+                    <span className="w-10 text-right">{formatTime(currentTime)}</span>
+                    <div className="relative flex-1 h-2 group cursor-pointer">
+                         <div className="absolute inset-0 bg-slate-100 rounded-full"></div>
+                         <div className="absolute inset-y-0 left-0 bg-indigo-500 rounded-full" style={{ width: `${(currentTime/(duration || 1))*100}%` }}></div>
+                         <input type="range" className="absolute inset-0 w-full opacity-0 cursor-pointer" min={0} max={duration || 1} step="0.1" value={currentTime} onChange={handleSeek} />
+                    </div>
+                    <span className="w-10">{formatTime(duration)}</span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-6">
+                    {/* Main Controls */}
+                    <div className="flex items-center gap-6 order-2 sm:order-1">
+                        <button 
+                            onClick={() => {
+                                const newTime = Math.max(0, currentTime - 10);
+                                setCurrentTime(newTime);
+                                if(isPlaying) play(newTime);
+                                else pausedAtRef.current = newTime;
+                            }}
+                            className="text-slate-400 hover:text-indigo-600 transition-colors flex flex-col items-center gap-1 group"
+                            title="Rewind 10s"
+                        >
+                            <svg className="w-8 h-8 bg-slate-50 rounded-full p-1.5 group-hover:bg-indigo-50 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.334 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8L4.066 11.2z" /></svg>
+                            <span className="text-[10px] font-bold uppercase">10s</span>
+                        </button>
+
+                        <button 
+                            onClick={togglePlay}
+                            className="w-16 h-16 bg-indigo-600 text-white rounded-full flex items-center justify-center hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 hover:scale-105 active:scale-95"
+                        >
+                             {isPlaying ? (
+                                <svg className="w-8 h-8" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>
+                             ) : (
+                                <svg className="w-8 h-8 ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                             )}
+                        </button>
+
+                        <button 
+                            onClick={() => {
+                                const newTime = Math.min(duration, currentTime + 10);
+                                setCurrentTime(newTime);
+                                if(isPlaying) play(newTime);
+                                else pausedAtRef.current = newTime;
+                            }}
+                             className="text-slate-400 hover:text-indigo-600 transition-colors flex flex-col items-center gap-1 group"
+                             title="Forward 10s"
+                        >
+                            <svg className="w-8 h-8 bg-slate-50 rounded-full p-1.5 group-hover:bg-indigo-50 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.933 12.8a1 1 0 000-1.6L6.6 7.2A1 1 0 005 8v8a1 1 0 001.6.8l5.333-4zM19.933 12.8a1 1 0 000-1.6l-5.333-4A1 1 0 0013 8v8a1 1 0 001.6.8l5.333-4z" /></svg>
+                            <span className="text-[10px] font-bold uppercase">10s</span>
+                        </button>
+                    </div>
+
+                    {/* Volume Control */}
+                    <div className="flex items-center gap-3 group/vol bg-slate-50 px-4 py-2 rounded-lg order-1 sm:order-2">
+                        <button onClick={() => setVolume(v => v === 0 ? 1 : 0)} className="text-slate-400 hover:text-slate-600">
+                            {volume === 0 ? (
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" /></svg>
+                            ) : (
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+                            )}
+                        </button>
+                        <div className="w-24 h-1.5 bg-slate-200 rounded-full relative overflow-hidden cursor-pointer">
+                            <div className="absolute inset-y-0 left-0 bg-slate-400 group-hover/vol:bg-indigo-500 transition-colors" style={{ width: `${volume * 100}%` }}></div>
+                            <input 
+                                type="range" 
+                                min="0" 
+                                max="1" 
+                                step="0.05" 
+                                value={volume} 
+                                onChange={(e) => setVolume(parseFloat(e.target.value))}
+                                className="absolute inset-0 w-full opacity-0 cursor-pointer"
+                            />
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+      </div>
+
+      <div className="mt-8 p-4 bg-indigo-50 border border-indigo-100 rounded-lg text-sm text-indigo-800 flex items-start gap-3">
         <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
@@ -421,7 +527,7 @@ export const ArticleView: React.FC<Props> = ({ article, onWordSelect }) => {
             <ul className="list-disc list-inside space-y-1 opacity-90">
                 <li>Click any sentence to listen to it on loop.</li>
                 <li><strong>Double-click</strong> any word to see definitions and add it to your vocabulary list.</li>
-                <li>Use the slider to jump to any part of the report.</li>
+                <li>Use the audio controls below to control speed and volume.</li>
             </ul>
         </div>
       </div>
